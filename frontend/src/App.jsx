@@ -1,741 +1,832 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import * as $3Dmol from '3dmol';
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+} from 'react-router-dom';
 import './App.css';
 
-// Component to draw dynamic phylogenetic tree on Canvas
-const TreeVisualizer = ({ newickStr, taxa }) => {
-  const canvasRef = useRef(null);
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+const TOKEN_KEY = 'aletheia-auth-token';
+const api = axios.create({ baseURL: API_BASE_URL });
 
-  useEffect(() => {
-    if (!canvasRef.current || !taxa || taxa.length === 0) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
-    ctx.strokeStyle = '#087F8C';
-    ctx.lineWidth = 2;
-    ctx.fillStyle = '#15365B';
-    ctx.font = '13px sans-serif';
+api.interceptors.response.use(undefined, (error) => {
+  const url = error.config?.url || '';
+  if (error.response?.status === 401 && !url.includes('/api/auth/login')) {
+    window.dispatchEvent(new Event('aletheia:session-expired'));
+  }
+  return Promise.reject(error);
+});
 
-    const startX = 40;
-    const startY = 40;
-    const stepY = (canvas.height - 80) / Math.max(taxa.length - 1, 1);
-    const endX = canvas.width - 180;
+const modulesList = [
+  { id: 'protein', title: 'Proteomics Engine', desc: 'UniProt & Biophysical Metrics', accent: '#e4f5f4', accentStrong: '#087f8c', icon: 'protein' },
+  { id: 'structure', title: '3D Structure Viewer', desc: 'Interactive 3D/MD Rendering', accent: '#eff6ff', accentStrong: '#15365b', icon: 'structure' },
+  { id: 'phylogeny', title: 'Dynamic Phylogenetics Tree', desc: 'FASTA Alignment & Graphical Tree', accent: '#dcfce7', accentStrong: '#16a34a', icon: 'phylogeny' },
+  { id: 'molecule', title: 'ChemInformatics (RDKit)', desc: 'Small-Molecule Drug Analysis', accent: '#fee2e2', accentStrong: '#dc2626', icon: 'molecule' },
+  { id: 'gene', title: 'Genomics (NCBI)', desc: 'Gene & Nucleotide Search', accent: '#fef3c7', accentStrong: '#d97706', icon: 'gene' },
+  { id: 'docking', title: 'CADD & Docking Studio', desc: 'Dynamic Protein-Ligand Simulation', accent: '#e0f2fe', accentStrong: '#0284c7', icon: 'docking' },
+  { id: 'agent', title: 'AI Agent View', desc: 'Natural Language Router', accent: '#f3e8ff', accentStrong: '#9333ea', icon: 'agent' },
+];
 
-    ctx.beginPath();
-    ctx.moveTo(startX, startY);
-    ctx.lineTo(startX, startY + (taxa.length - 1) * stepY);
-    ctx.stroke();
-
-    taxa.forEach((taxon, index) => {
-      const y = startY + index * stepY;
-      ctx.beginPath();
-      ctx.moveTo(startX, y);
-      ctx.lineTo(endX, y);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(endX, y, 4, 0, 2 * Math.PI);
-      ctx.fillStyle = '#16A34A';
-      ctx.fill();
-
-      ctx.fillStyle = '#15365B';
-      ctx.fillText(`🌿 ${taxon}`, endX + 10, y + 4);
-    });
-  }, [newickStr, taxa]);
-
-  return (
-    <div style={{ background: '#F8FAFC', padding: '16px', borderRadius: '12px', border: '1px solid #DCE5ED', marginBottom: '16px' }}>
-      <h4 style={{ color: '#087F8C', marginTop: 0, fontSize: '14px' }}>🌳 Rendered Graphical Phylogenetic Tree</h4>
-      <canvas ref={canvasRef} width={600} height={220} style={{ width: '100%', height: 'auto' }} />
-    </div>
-  );
+const moduleInputs = {
+  protein: { label: 'Protein sequence or UniProt accession', placeholder: 'Paste a protein sequence or enter a UniProt ID (e.g. P68871)...' },
+  structure: { label: 'UniProt accession', placeholder: 'Enter a UniProt ID (e.g. P68871)...' },
+  phylogeny: { label: 'FASTA sequences', placeholder: 'Paste at least two sequences in FASTA format...' },
+  molecule: { label: 'SMILES or compound structure', placeholder: 'Enter a SMILES string (e.g. CCO)...' },
+  gene: { label: 'Gene symbol', placeholder: 'Enter a gene symbol (e.g. TP53)...' },
+  docking: { label: 'Protein and ligand inputs', placeholder: 'Paste the protein sequence...' },
+  agent: { label: 'Research question', placeholder: 'Ask the AI agent to route a research question...' },
 };
 
-function App() {
-  const [activeTab, setActiveTab] = useState('protein');
-  const [inputData, setInputData] = useState('');
-  const [dockingSeq, setDockingSeq] = useState('');
-  const [dockingSmiles, setDockingSmiles] = useState('');
-  const [fastaInput, setFastaInput] = useState('');
-  const [chatMessages, setChatMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState(null);
+const moduleExamples = {
+  protein: ['P68871', 'P00042', 'P01308'],
+  structure: ['P68871', 'P01308', 'Q9Y261'],
+  phylogeny: [
+    {
+      label: 'Two-sequence FASTA',
+      value: '>sequence_1\nMKWVTFISLLFLFSSAYS\n>sequence_2\nMKWVTFISLLFLFSSAYA',
+    },
+  ],
+  molecule: ['CCO', 'CC(=O)OC1=CC=CC=C1C(=O)O', 'C1=CC=CC=C1'],
+  gene: ['TP53', 'BRCA1', 'EGFR'],
+  docking: [
+    {
+      label: 'Hemoglobin + ethanol',
+      proteinSequence: 'MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSHGSAQVKGHGKKVADALTNAVAHVDDMPNALSALSDLHAHKLRVDPVNFKLLSHCLLVTLAAHLPAEFTPAVHASLDKFLASVSTVLTSKYR',
+      ligandSmiles: 'CCO',
+    },
+  ],
+  agent: ['Analyze protein P68871', 'Find 3D structure for P68871', 'Analyze aspirin'],
+};
+
+const moduleHighlights = {
+  protein: [['🧬', 'Protein properties', 'MW, pI, stability'], ['🧊', 'Structure insights', 'Domains & motifs'], ['🔗', 'Functional analysis', 'GO terms & pathways'], ['📊', 'Sequence metrics', 'Composition & hydrophobicity']],
+  structure: [['🧊', 'Model confidence', 'AlphaFold confidence'], ['🧬', 'Protein model', 'PDB structure link'], ['🔍', 'Structural metrics', 'Model metadata'], ['📊', 'Quality insights', 'Validation scores']],
+  phylogeny: [['🌿', 'Sequence alignment', 'FASTA records'], ['🌳', 'Phylogenetic tree', 'Newick output'], ['🧪', 'Distance matrix', 'Identity distance'], ['📊', 'Comparative analysis', 'Related sequences']],
+  molecule: [['⚗️', 'Molecular weight', 'Calculated by RDKit'], ['🧪', 'Drug likeness', 'Lipinski rules'], ['🔗', 'Lipophilicity', 'LogP and TPSA'], ['📊', 'Structure metrics', 'H-bond counts']],
+  gene: [['🧬', 'Gene identity', 'Symbol and accession'], ['🌎', 'Organism', 'NCBI record'], ['🔍', 'Gene summary', 'Description and location'], ['📚', 'Source', 'NCBI Entrez']],
+  docking: [['🧬', 'Protein metrics', 'Sequence properties'], ['⚗️', 'Ligand metrics', 'SMILES descriptors'], ['🎯', 'Binding estimate', 'Scoring output'], ['📊', 'Interaction profile', 'Simulation summary']],
+  agent: [['🤖', 'Query routing', 'Domain selection'], ['🔬', 'Research context', 'Omics workflows'], ['🧭', 'Tool guidance', 'Suggested next steps'], ['📊', 'Structured response', 'Agent output']],
+};
+
+function getModuleById(moduleId) {
+  return modulesList.find((module) => module.id === moduleId) || null;
+}
+
+function BrandMark() {
+  return (
+    <div className="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2 15c6.667-6 13.333 0 20-6M2 9c6.667 6 13.333 0 20 6" />
+        <circle cx="6" cy="12" r="1.6" fill="currentColor" stroke="none" />
+        <circle cx="18" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      </svg>
+    </div>
+  );
+}
+
+function ModuleIcon({ moduleId }) {
+  const commonProps = {
+    width: 22,
+    height: 22,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: '2',
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': true,
+  };
+
+  const paths = {
+    protein: <><circle cx="6" cy="12" r="3" /><circle cx="18" cy="12" r="3" /><path d="M9 12h6M12 9v6" /></>,
+    structure: <><path d="M4 7.5 12 4l8 3.5-8 3.5L4 7.5Z" /><path d="M4 12.5 12 16l8-3.5M4 17.5 12 21l8-3.5" /></>,
+    phylogeny: <><path d="M4 18h6M14 18h6M10 18V8m4 10V6M9 8h6" /><path d="M7 8h10" /></>,
+    molecule: <><path d="M12 3 5 7v10l7 4 7-4V7l-7-4Z" /><path d="M12 3v18M5 7l7 4 7-4" /></>,
+    gene: <><path d="M4 9c0-3 3-5 8-5s8 2 8 5-3 5-8 5-8 2-8 5 3 5 8 5 8-2 8-5" /><path d="M8 12h8" /></>,
+    docking: <><circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="2.5" /><path d="M12 3v18M3 12h18" /></>,
+    agent: <><rect x="5" y="7" width="14" height="10" rx="2" /><path d="M9 12h6M12 9v6M8 5h8" /></>,
+  };
+
+  return <svg {...commonProps}>{paths[moduleId] || <circle cx="12" cy="12" r="8" />}</svg>;
+}
+
+function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+}
+
+function storeToken(token, rememberMe) {
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+  (rememberMe ? localStorage : sessionStorage).setItem(TOKEN_KEY, token);
+}
+
+function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+}
+
+function getHistoryKey(email) {
+  return `aletheia-analysis-history:${email}`;
+}
+
+function readHistory(email) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(getHistoryKey(email)) || '[]');
+    return Array.isArray(stored) ? stored : [];
+  } catch (error) {
+    console.error('Could not read the saved analysis history.', error);
+    return [];
+  }
+}
+
+function saveHistory(email, moduleId) {
+  try {
+    const record = {
+      id: crypto.randomUUID(),
+      moduleId,
+      createdAt: new Date().toISOString(),
+      status: 'Completed',
+    };
+    const records = [record, ...readHistory(email)].slice(0, 50);
+    localStorage.setItem(getHistoryKey(email), JSON.stringify(records));
+  } catch (error) {
+    console.error('The analysis completed, but its history could not be saved.', error);
+  }
+}
+
+function getInitials(name) {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || '')
+    .join('') || 'AB';
+}
+
+function AuthShell({ children }) {
+  return (
+    <main className="login-shell">
+      <section className="login-hero">
+        <div className="hero-brand-row">
+          <BrandMark />
+          <div>
+            <h3>Aletheia Bio</h3>
+            <p>Enterprise Multi-Omics Agent</p>
+          </div>
+        </div>
+
+        <div className="hero-copy">
+          <span className="hero-eyebrow">SCIENTIFIC DISCOVERY, CONNECTED</span>
+          <h1>Smarter Insights.<br /><span>Deeper Biology.</span></h1>
+          <p>Integrating genomics, proteomics and drug design with AI to accelerate research and discovery.</p>
+          <div className="feature-stack">
+            <div className="feature-pill">
+              <span className="mini-icon">🧬</span>
+              <div><strong>Multi-Omics Analysis</strong><small>Genomics · Proteomics · Drug Design</small></div>
+            </div>
+            <div className="feature-pill">
+              <span className="mini-icon">✦</span>
+              <div><strong>Authoritative Sources</strong><small>NCBI · UniProt · RCSB PDB · PubChem</small></div>
+            </div>
+            <div className="feature-pill">
+              <span className="mini-icon">⚡</span>
+              <div><strong>AI-Powered Research</strong><small>Reliable, reproducible scientific workflows</small></div>
+            </div>
+          </div>
+        </div>
+        <div className="hero-footer">From Data <span>→</span> To Discovery</div>
+      </section>
+
+      <section className="login-panel">
+        <div className="login-card">
+          <div className="login-card-brand">
+            <BrandMark />
+            <div>
+              <h3>Aletheia Bio</h3>
+              <p>Enterprise Multi-Omics Agent</p>
+            </div>
+          </div>
+          {children}
+          <div className="trust-row"><span>Secure</span><span>·</span><span>Private by design</span><span>·</span><span>Built for Science</span></div>
+        </div>
+      </section>
+      <span className="login-art" aria-hidden="true">
+        <svg viewBox="0 0 280 380" fill="none">
+          <path d="M45 30C245 105 35 270 235 350M235 30C35 105 245 270 45 350" />
+          <path d="M72 55h136M48 95h184M56 140h168M85 185h110M55 230h170M46 275h188M69 320h142" />
+          <circle cx="45" cy="30" r="6" /><circle cx="235" cy="30" r="6" />
+          <circle cx="45" cy="350" r="6" /><circle cx="235" cy="350" r="6" />
+        </svg>
+      </span>
+    </main>
+  );
+}
+
+function LoginPage({ onAuthenticated, notice }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const viewerRef = useRef(null);
-
-  useEffect(() => {
-    if (activeTab === 'structure' && response && response.pdb_url && viewerRef.current) {
-      viewerRef.current.innerHTML = '';
-      const viewer = $3Dmol.createViewer(viewerRef.current, {
-        backgroundColor: 'black',
-        width: viewerRef.current.clientWidth || 600,
-        height: 380
-      });
-      
-      fetch(response.pdb_url)
-        .then((res) => res.text())
-        .then((pdbText) => {
-          viewer.addModel(pdbText, 'pdb');
-          viewer.setStyle({}, { cartoon: { color: 'spectrum' } });
-          viewer.zoomTo();
-          viewer.render();
-        })
-        .catch((err) => console.error("PDB load error:", err));
-    }
-  }, [response, activeTab]);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+  const handleLogin = async (event) => {
+    event.preventDefault();
     setError('');
-    
-    if (activeTab !== 'agent') {
-      setResponse(null);
-    }
-
+    setMessage('');
+    setLoading(true);
     try {
-      if (activeTab === 'protein') {
-        const res = await axios.post('http://127.0.0.1:8000/api/analyze-protein', { input_data: inputData });
-        setResponse(res.data);
-      } else if (activeTab === 'structure') {
-        const res = await axios.get(`http://127.0.0.1:8000/api/protein-structure/${inputData.trim()}`);
-        setResponse(res.data);
-      } else if (activeTab === 'phylogeny') {
-        const res = await axios.post('http://127.0.0.1:8000/api/phylogenetic-analysis-dynamic', { fasta_sequences: fastaInput });
-        setResponse(res.data);
-      } else if (activeTab === 'molecule') {
-        const res = await axios.post('http://127.0.0.1:8000/api/analyze-molecule', { smiles: inputData });
-        setResponse(res.data);
-      } else if (activeTab === 'gene') {
-        const res = await axios.post('http://127.0.0.1:8000/api/analyze-gene', { gene_symbol: inputData });
-        setResponse(res.data);
-      } else if (activeTab === 'docking') {
-        const res = await axios.post('http://127.0.0.1:8000/api/dynamic-docking-simulation', { protein_sequence: dockingSeq, smiles: dockingSmiles });
-        setResponse(res.data);
-      } else if (activeTab === 'agent') {
-        const userMsg = inputData;
-        if (!userMsg.trim()) return;
-        setChatMessages((prev) => [...prev, { sender: 'user', text: userMsg }]);
-        setInputData('');
-        
-        const res = await axios.post('http://127.0.0.1:8000/api/agent-chat', { message: userMsg });
-        setChatMessages((prev) => [
-          ...prev, 
-          { sender: 'agent', data: res.data.response }
-        ]);
-      }
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Request failed.');
+      const response = await api.post('/api/auth/login', {
+        email: email.trim(),
+        password,
+        remember_me: rememberMe,
+      });
+      storeToken(response.data.access_token, rememberMe);
+      onAuthenticated(response.data.user);
+    } catch (requestError) {
+      setError(requestError.response?.data?.detail || 'Unable to sign in. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDownloadReport = () => {
-    const downloadData = activeTab === 'agent' ? chatMessages : response;
-    if (!downloadData) return;
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(downloadData, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `aletheia_bio_report_${Date.now()}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+  return (
+    <AuthShell>
+      <h2>Welcome Back</h2>
+      <p className="subheading">Sign in to continue to your research workspace</p>
+      {(notice || error) && <div className="form-alert error" role="alert">{error || notice}</div>}
+      {message && <div className="form-alert success" role="status">{message}</div>}
+      <form onSubmit={handleLogin} className="login-form">
+        <label className="field-group">
+          <span>Email Address</span>
+          <div className="input-shell">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></svg>
+            <input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Enter your email address" required maxLength={254} />
+          </div>
+        </label>
+        <label className="field-group">
+          <span>Password</span>
+          <div className="input-shell password-shell">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
+            <input type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" required maxLength={128} />
+            <button type="button" className="toggle-password" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button>
+          </div>
+        </label>
+        <div className="login-options">
+          <label className="remember-box">
+            <input type="checkbox" checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} />
+            <span>Remember me</span>
+          </label>
+          <button type="button" className="text-button" onClick={() => setMessage('Password reset is not configured. Contact your workspace administrator to reset your account.')}>Forgot password?</button>
+        </div>
+        <button type="submit" className="primary-login-btn" disabled={loading}>{loading ? 'Signing in…' : '→  Sign In'}</button>
+      </form>
+      <div className="divider"><span>OR</span></div>
+      <button type="button" className="google-btn" disabled title="Google OAuth is not configured for this installation">
+        <span className="google-g">G</span>
+        Continue with Google
+      </button>
+      <p className="auth-note">Google sign-in is not configured. <Link to="/register">Create an account</Link></p>
+    </AuthShell>
+  );
+}
+
+function RegisterPage({ onAuthenticated }) {
+  const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleRegister = async (event) => {
+    event.preventDefault();
+    setError('');
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+    if (password.length < 12) {
+      setError('Choose a password with at least 12 characters.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await api.post('/api/auth/register', {
+        display_name: displayName.trim(),
+        email: email.trim(),
+        password,
+        remember_me: rememberMe,
+      });
+      storeToken(response.data.access_token, rememberMe);
+      onAuthenticated(response.data.user);
+    } catch (requestError) {
+      setError(requestError.response?.data?.detail || 'Unable to create your account. Check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="dashboard-container">
-      {/* A. Top Navigation Bar */}
-      <header className="header-nav">
-        <div className="brand-section">
-          <svg className="dna-logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M2 15c6.667-6 13.333 0 20-6M2 9c6.667 6 13.333 0 20 6" />
-            <circle cx="6" cy="12" r="1.5" fill="currentColor" />
-            <circle cx="18" cy="12" r="1.5" fill="currentColor" />
-          </svg>
-          <span className="brand-name">Aletheia Bio</span>
-          <span className="brand-divider">|</span>
-          <span className="brand-subtitle">Enterprise Multi-Omics Agent</span>
-        </div>
-
-        <div className="nav-stats">
-          <div className="system-online-badge">
-            <div className="green-dot"></div>
-            System Online
+    <AuthShell registration>
+      <h2>Create your account</h2>
+      <p className="subheading">Set up your private research workspace</p>
+      {error && <div className="form-alert error" role="alert">{error}</div>}
+      <form onSubmit={handleRegister} className="login-form register-form">
+        <label className="field-group">
+          <span>Full Name</span>
+          <div className="input-shell"><input autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Enter your name" required minLength={2} maxLength={80} /></div>
+        </label>
+        <label className="field-group">
+          <span>Email Address</span>
+          <div className="input-shell"><input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Enter your email address" required maxLength={254} /></div>
+        </label>
+        <label className="field-group">
+          <span>Password <small>(12 characters minimum)</small></span>
+          <div className="input-shell password-shell">
+            <input type={showPassword ? 'text' : 'password'} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Create a strong password" required minLength={12} maxLength={128} />
+            <button type="button" className="toggle-password" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button>
           </div>
-          
-          <button className="nav-icon-btn" title="Notifications">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-            </svg>
-            <span className="notification-dot"></span>
+        </label>
+        <label className="field-group">
+          <span>Confirm Password</span>
+          <div className="input-shell"><input type={showPassword ? 'text' : 'password'} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Re-enter your password" required maxLength={128} /></div>
+        </label>
+        <label className="remember-box">
+          <input type="checkbox" checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} />
+          <span>Keep me signed in on this device</span>
+        </label>
+        <button type="submit" className="primary-login-btn" disabled={loading}>{loading ? 'Creating account…' : 'Create Account'}</button>
+      </form>
+      <div className="divider"><span>ALREADY REGISTERED?</span></div>
+      <Link to="/" className="google-btn create-account-link">Back to Sign In</Link>
+      <p className="auth-note">One account per email address. Credentials are stored using salted password hashing.</p>
+    </AuthShell>
+  );
+}
+
+function SidebarLink({ to, label, icon, active, end = false }) {
+  return (
+    <NavLink to={to} end={end} className={({ isActive }) => `sidebar-item${(active === undefined ? isActive : active) ? ' active' : ''}`} title={label}>
+      {icon}<span className="nav-label">{label}</span>
+    </NavLink>
+  );
+}
+
+function DashboardLayout({ user, onLogout, searchQuery, setSearchQuery, children }) {
+  const location = useLocation();
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const history = readHistory(user.email);
+  const notificationsEnabled = getPreferences(user.email).notifications !== false;
+  const moduleNavActive = location.pathname.startsWith('/module') || (location.pathname === '/dashboard' && location.hash === '#modules');
+  const profileName = user.display_name || user.email;
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <Link to="/dashboard" className="sidebar-brand">
+          <BrandMark />
+          <div><h4>Aletheia Bio</h4><p>Enterprise Multi-Omics Agent</p></div>
+        </Link>
+        <nav className="sidebar-menu" aria-label="Sidebar navigation">
+          <SidebarLink to="/dashboard" label="Dashboard" active={location.pathname === '/dashboard' && location.hash !== '#modules'} end icon={<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /></svg>} />
+          <SidebarLink to="/dashboard#modules" label="Modules" active={moduleNavActive} end icon={<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="6" cy="6" r="3" /><circle cx="18" cy="18" r="3" /><path d="m8.5 8.5 7 7M12 6v12" /></svg>} />
+          <SidebarLink to="/history" label="History" end icon={<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>} />
+          <SidebarLink to="/settings" label="Settings" end icon={<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1a2 2 0 1 1-2.8 2.8l-.1-.1a2 2 0 0 0-3.4 1.4v.2a2 2 0 1 1-4 0v-.2a2 2 0 0 0-3.4-1.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a2 2 0 0 0-1.4-3.4h-.2a2 2 0 1 1 0-4h.2a2 2 0 0 0 1.4-3.4l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a2 2 0 0 0 3.4-1.4v-.2a2 2 0 1 1 4 0v.2a2 2 0 0 0 3.4 1.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a2 2 0 0 0 1.4 3.4h.2a2 2 0 1 1 0 4h-.2a2 2 0 0 0-1.4 3.4Z" /></svg>} />
+          <button type="button" className="sidebar-item sidebar-logout" onClick={onLogout} title="Sign out">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3" /><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6" /></svg>
+            <span className="nav-label">Sign out</span>
           </button>
+        </nav>
+        <div className="sidebar-footer">From Data <span>→</span><br />To Discovery</div>
+      </aside>
 
-          <div className="user-profile-avatar">
-            <div className="avatar-badge">SA</div>
-            <span className="user-name">Sania Arooj ▾</span>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Layout Split */}
-      <div className="main-layout">
-        {/* B. Left Sidebar Domain Selection */}
-        <aside className="sidebar-panel">
-          <div className="sidebar-title">Domain Selection</div>
-          
-          <div className="sidebar-menu">
-            <button 
-              onClick={() => { setActiveTab('protein'); setInputData(''); setResponse(null); }} 
-              className={`module-card-btn ${activeTab === 'protein' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/>
-                    <path d="M8.5 8.5l7 7M12 6v12"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>Proteomics Engine</h4>
-                  <p>UniProt & Biophysical Metrics</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-
-            <button 
-              onClick={() => { setActiveTab('structure'); setInputData(''); setResponse(null); }} 
-              className={`module-card-btn ${activeTab === 'structure' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>3D Structure Viewer</h4>
-                  <p>Interactive 3D/MD Rendering</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-
-            <button 
-              onClick={() => { setActiveTab('phylogeny'); setResponse(null); }} 
-              className={`module-card-btn ${activeTab === 'phylogeny' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M12 2v20M12 18H6M12 10h8M6 18H2M20 10h2"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>Dynamic Phylogenetics Tree</h4>
-                  <p>FASTA Alignment & Graphical Tree</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-
-            <button 
-              onClick={() => { setActiveTab('molecule'); setInputData(''); setResponse(null); }} 
-              className={`module-card-btn ${activeTab === 'molecule' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M10 2v7.5M14 2v7.5M8.5 13a4.5 4.5 0 1 0 7 0H8.5z"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>ChemInformatics (RDKit)</h4>
-                  <p>Small-Molecule Drug Analysis</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-
-            <button 
-              onClick={() => { setActiveTab('gene'); setInputData(''); setResponse(null); }} 
-              className={`module-card-btn ${activeTab === 'gene' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M2 15c6.667-6 13.333 0 20-6M2 9c6.667 6 13.333 0 20 6"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>Genomics (NCBI)</h4>
-                  <p>Gene & Nucleotide Search</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-
-            <button 
-              onClick={() => { setActiveTab('docking'); setResponse(null); }} 
-              className={`module-card-btn ${activeTab === 'docking' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>CADD & Docking Studio</h4>
-                  <p>Dynamic Protein-Ligand Simulation</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-
-            <button 
-              onClick={() => { setActiveTab('agent'); setInputData(''); }} 
-              className={`module-card-btn ${activeTab === 'agent' ? 'active' : ''}`}
-            >
-              <div className="module-card-content">
-                <div className="module-icon-wrapper">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/>
-                  </svg>
-                </div>
-                <div className="module-text-wrapper">
-                  <h4>AI Agent View</h4>
-                  <p>Natural Language Router</p>
-                </div>
-              </div>
-              <span className="chevron-icon">›</span>
-            </button>
-          </div>
-        </aside>
-
-        {/* C. Main Content Workspace Card */}
-        <main className="workspace-panel">
-          <div className="workspace-card">
-            
-            {/* Header Control Bar */}
-            <div className="workspace-header-bar">
-              <button className="back-badge-btn" onClick={() => setActiveTab('protein')}>
-                ← {activeTab.toUpperCase()} Module
+      <main className="main-panel">
+        <header className="topbar">
+          <label className="search-box">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4.35-4.35" /></svg>
+            <input type="search" aria-label="Search modules" placeholder="Search modules..." value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} />
+          </label>
+          <div className="topbar-actions">
+            <div className="notification-wrap">
+              <button type="button" className="icon-button" aria-label={notificationsEnabled ? 'Notifications' : 'Notifications disabled'} aria-expanded={notificationsOpen} disabled={!notificationsEnabled} onClick={() => setNotificationsOpen((value) => !value)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M14 21a2 2 0 0 1-4 0" /></svg>
+                {notificationsEnabled && history.length > 0 && <span className="notification-dot" />}
               </button>
-              
-              <div className="workspace-status-controls">
-                <span className="api-online-pill">
-                  <span className="green-dot"></span> API Online
-                </span>
-                <a href="#help" className="help-docs-btn" onClick={(e) => e.preventDefault()}>
-                  Help & Docs ↗
-                </a>
-              </div>
-            </div>
-
-            {/* Hero Section Title */}
-            <div className="hero-title-section">
-              <div className="module-hero-icon">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/>
-                  <path d="M8.5 8.5l7 7M12 6v12"/>
-                </svg>
-              </div>
-              <div>
-                <h1>
-                  {activeTab === 'protein' && 'Protein Sequence Engine'}
-                  {activeTab === 'structure' && '3D Structure Prediction & Viewer'}
-                  {activeTab === 'phylogeny' && 'Dynamic Phylogenetics Alignment & Tree Viewer'}
-                  {activeTab === 'molecule' && 'Small-Molecule Drug Design Studio'}
-                  {activeTab === 'gene' && 'Genomics Research Hub'}
-                  {activeTab === 'docking' && 'Dynamic CADD & Molecular Docking Studio'}
-                  {activeTab === 'agent' && 'Unified Conversational AI Agent'}
-                </h1>
-                <p>
-                  {activeTab === 'protein' && 'Enter UniProt ID (e.g. P68871) or sequence to analyze protein properties, structure and functional insights.'}
-                  {activeTab === 'structure' && 'Enter UniProt ID for AlphaFold 3D model & 3Dmol rendering.'}
-                  {activeTab === 'phylogeny' && 'Enter Multi-FASTA sequences to dynamically compute distance matrix & draw graphical tree.'}
-                  {activeTab === 'molecule' && 'Enter SMILES string (e.g., CC(=O)OC1=CC=CC=C1C(=O)O) for RDKit analysis.'}
-                  {activeTab === 'gene' && 'Enter gene symbol (e.g., TP53, BRCA1) for NCBI metadata.'}
-                  {activeTab === 'docking' && 'Input custom protein sequence and ligand SMILES for simulation.'}
-                  {activeTab === 'agent' && 'Ask any natural language multi-omics question.'}
-                </p>
-              </div>
-            </div>
-
-            {/* Input Form Section */}
-            {activeTab === 'phylogeny' ? (
-              <form onSubmit={handleSubmit} className="analysis-card-wrapper">
-                <textarea
-                  rows={4}
-                  value={fastaInput}
-                  onChange={(e) => setFastaInput(e.target.value)}
-                  placeholder={">Isoform_A\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAT\n>Isoform_B\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPIL"}
-                  disabled={loading}
-                  style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'monospace' }}
-                />
-                <button type="submit" disabled={loading} className="run-analysis-btn" style={{ width: '100%', marginTop: '10px', justifyContent: 'center' }}>
-                  {loading ? 'Building Tree...' : 'Build Dynamic Phylogenetic Tree'}
-                </button>
-              </form>
-            ) : activeTab === 'docking' ? (
-              <form onSubmit={handleSubmit} className="analysis-card-wrapper">
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <textarea
-                    value={dockingSeq}
-                    onChange={(e) => setDockingSeq(e.target.value)}
-                    placeholder="Enter Protein Amino Acid Sequence..."
-                    disabled={loading}
-                    rows={2}
-                    style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'monospace' }}
-                  />
-                  <div className="search-input-group">
-                    <input
-                      type="text"
-                      value={dockingSmiles}
-                      onChange={(e) => setDockingSmiles(e.target.value)}
-                      placeholder="Enter Ligand SMILES..."
-                      disabled={loading}
-                    />
-                    <button type="submit" disabled={loading} className="run-analysis-btn">
-                      {loading ? 'Simulating...' : 'Run Docking'}
-                    </button>
-                  </div>
+              {notificationsOpen && (
+                <div className="notification-popover" role="status">
+                  <strong>Recent activity</strong>
+                  {history[0]
+                    ? <p>{getModuleById(history[0].moduleId)?.title || 'Research module'} completed an analysis.</p>
+                    : <p>No activity yet. Complete a module analysis to see updates here.</p>}
+                  <Link to="/history" onClick={() => setNotificationsOpen(false)}>View analysis history</Link>
                 </div>
-              </form>
-            ) : (
-              <form onSubmit={handleSubmit} className="analysis-card-wrapper">
-                <div className="search-input-group">
-                  <svg className="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-                  </svg>
-                  <input
-                    type="text"
-                    value={inputData}
-                    onChange={(e) => setInputData(e.target.value)}
-                    placeholder={
-                      activeTab === 'agent' ? "Ask any multi-omics question (e.g., Analyze protein P68871)..." :
-                      activeTab === 'structure' || activeTab === 'protein' ? "e.g. P68871 or paste protein sequence..." :
-                      activeTab === 'molecule' ? "e.g. CC(=O)OC1=CC=CC=C1C(=O)O" :
-                      "e.g. TP53"
-                    }
-                    disabled={loading}
-                  />
-                  <button type="submit" disabled={loading} className="run-analysis-btn">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                      <polygon points="5 3 19 12 5 21 5 3"/>
-                    </svg>
-                    {loading ? 'Processing...' : activeTab === 'agent' ? 'Send Query' : 'Run Analysis'}
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* Presets Selector */}
-            <div className="presets-section">
-              <span className="presets-label">Preset:</span>
-              {activeTab === 'agent' && (
-                <button type="button" onClick={() => setInputData("Analyze structure and docking for protein P68871")} className="preset-chip">🔗 Sample Agent Query ▾</button>
-              )}
-              {activeTab === 'docking' && (
-                <button 
-                  type="button" 
-                  onClick={() => { 
-                    setDockingSeq("MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAT"); 
-                    setDockingSmiles("CC(=O)OC1=CC=CC=C1C(=O)O"); 
-                  }} 
-                  className="preset-chip"
-                >
-                  🔗 Ecotin + Aspirin Complex ▾
-                </button>
-              )}
-              {activeTab === 'phylogeny' && (
-                <button type="button" onClick={() => setFastaInput(">Isoform_A\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAT\n>Isoform_B\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPIL\n>Isoform_C\nMKTAYIAKQRQISFVKSHFSRQ")} className="preset-chip">🔗 FASTA Test Sequences ▾</button>
-              )}
-              {activeTab === 'structure' && (
-                <button type="button" onClick={() => setInputData("P68871")} className="preset-chip">🔗 Hemoglobin (P68871) ▾</button>
-              )}
-              {activeTab === 'protein' && (
-                <button type="button" onClick={() => setInputData("P68871")} className="preset-chip">🔗 Hemoglobin (P68871) ▾</button>
-              )}
-              {activeTab === 'molecule' && (
-                <button type="button" onClick={() => setInputData("CC(=O)OC1=CC=CC=C1C(=O)O")} className="preset-chip">🔗 Aspirin ▾</button>
-              )}
-              {activeTab === 'gene' && (
-                <button type="button" onClick={() => setInputData("TP53")} className="preset-chip">🔗 TP53 Gene ▾</button>
               )}
             </div>
-
-            {error && <div className="error-alert">{error}</div>}
-
-            {/* FIRST: RESULTS TRACE (Renders on top when a query is submitted) */}
-            {activeTab === 'agent' ? (
-              chatMessages.length > 0 && (
-                <div className="results-container" style={{ marginBottom: '24px' }}>
-                  <div className="results-header">
-                    <h3>Agent Conversation Trace</h3>
-                    <button onClick={handleDownloadReport} className="download-report-btn">📥 Download Report</button>
-                  </div>
-                  <div className="results-content" style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                    {chatMessages.map((msg, index) => (
-                      <div key={index} style={{ background: msg.sender === 'user' ? '#F8FAFC' : '#E4F5F4', padding: '12px', borderRadius: '8px', borderLeft: msg.sender === 'user' ? '4px solid #15365B' : '4px solid #087F8C' }}>
-                        <strong>{msg.sender === 'user' ? '👤 User Query:' : '🤖 Agent Response:'}</strong>
-                        {msg.sender === 'user' ? <p style={{ margin: '4px 0 0 0' }}>{msg.text}</p> : <pre className="json-display" style={{ marginTop: '8px' }}>{JSON.stringify(msg.data.result, null, 2)}</pre>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )
-            ) : (
-              response && (
-                <div className="results-container" style={{ marginBottom: '24px' }}>
-                  <div className="results-header">
-                    <h3>Glass Box Execution Trace</h3>
-                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                      <span className="status-ok">HTTP 200 OK</span>
-                      <button onClick={handleDownloadReport} className="download-report-btn">📥 Download Report</button>
-                    </div>
-                  </div>
-                  <div className="results-content">
-                    {activeTab === 'phylogeny' && (
-                      <>
-                        <TreeVisualizer newickStr={response.newick_tree} taxa={response.taxa_names} />
-                        <div className="result-group">
-                          <label>Newick Format Tree String</label>
-                          <pre className="json-display">{response.newick_tree}</pre>
-                        </div>
-                      </>
-                    )}
-                    {activeTab === 'structure' && (
-                      <>
-                        <div className="result-group">
-                          <label>Interactive 3D Structure Viewer (3Dmol.js)</label>
-                          <div 
-                            ref={viewerRef} 
-                            style={{ 
-                              width: '100%', 
-                              height: '380px', 
-                              position: 'relative', 
-                              background: '#000', 
-                              borderRadius: '10px', 
-                              border: '1px solid #DCE5ED', 
-                              marginBottom: '15px',
-                              overflow: 'hidden'
-                            }}
-                          ></div>
-                          <div style={{ fontSize: '13px', color: '#15365B' }}>
-                            <strong>UniProt ID:</strong> {response.uniprot_id} | <strong>pLDDT Confidence:</strong> {response.plddt_confidence_score} <br />
-                            <a href={response.pdb_url} target="_blank" rel="noreferrer" style={{ color: '#087F8C', textDecoration: 'underline' }}>📥 Download PDB File</a>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                    <div className="result-group">
-                      <label>Analysis Payload</label>
-                      <pre className="json-display">{JSON.stringify(response, null, 2)}</pre>
-                    </div>
-                  </div>
-                </div>
-              )
-            )}
-
-            {/* SECOND: HERO SHOWCASE CARDS (Renders below the results) */}
-            {activeTab === 'protein' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— FROM SEQUENCES TO INSIGHTS</div>
-                  <h2>Explore Protein Biology with AI-Powered Analysis</h2>
-                  <p>Get comprehensive insights into protein function, structure, domains and properties — all in one place.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item">
-                      <div className="feature-indicator-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></div>
-                      <span>Sequence Analysis</span>
-                    </div>
-                    <div className="feature-indicator-item">
-                      <div className="feature-indicator-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 8.5l7 7"/></svg></div>
-                      <span>Structural Insights</span>
-                    </div>
-                    <div className="feature-indicator-item">
-                      <div className="feature-indicator-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg></div>
-                      <span>Functional Annotation</span>
-                    </div>
-                    <div className="feature-indicator-item">
-                      <div className="feature-indicator-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
-                      <span>Detailed Reports</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="220" height="180" viewBox="0 0 200 160" fill="none">
-                    <path d="M 30 80 Q 60 20, 90 80 T 150 80" stroke="#087F8C" strokeWidth="12" strokeLinecap="round" fill="none" opacity="0.85"/>
-                    <path d="M 40 90 Q 70 30, 100 90 T 160 90" stroke="#15365B" strokeWidth="8" strokeLinecap="round" fill="none" opacity="0.75"/>
-                    <circle cx="90" cy="80" r="6" fill="#16A34A" />
-                    <text x="100" y="75" fontSize="10" fill="#15365B" fontWeight="bold">UniProt ID</text>
-                    <text x="100" y="88" fontSize="9" fill="#087F8C">P68871</text>
-                  </svg>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'structure' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— HIGH RESOLUTION TERTIARY FOLDS</div>
-                  <h2>AlphaFold 3D Structural Modeling & Validation</h2>
-                  <p>Visualize secondary helix/sheet composition, Ramachandran validation maps, and pLDDT local confidence metrics.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🧊</div><span>pLDDT Confidence</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🌀</div><span>Alpha-Helices %</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">📐</div><span>Beta-Sheets %</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🎯</div><span>Ramachandran Stats</span></div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="200" height="160" viewBox="0 0 200 160">
-                    <path d="M 20 20 L 180 20 L 180 140 L 20 140 Z" fill="#087F8C" opacity="0.1" stroke="#087F8C" strokeWidth="2" />
-                    <circle cx="100" cy="80" r="45" fill="none" stroke="#15365B" strokeWidth="4" strokeDasharray="5,5" />
-                    <path d="M 70 80 Q 100 40, 130 80 T 160 80" stroke="#16A34A" strokeWidth="6" fill="none" />
-                  </svg>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'phylogeny' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— CLADISTIC EVOLUTIONARY LINEAGE</div>
-                  <h2>Dynamic Clustal Alignment & Phylogram Generation</h2>
-                  <p>Align multi-FASTA protein/nucleotide isolates, compute distance matrices, and plot Newick phylogenetic trees.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🌳</div><span>Neighbor-Joining</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">📊</div><span>Distance Matrix</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🌿</div><span>Clade Divergence</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🧬</div><span>FASTA Align</span></div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="200" height="160" viewBox="0 0 200 160">
-                    <path d="M 30 30 L 30 130 M 30 50 L 120 50 M 30 110 L 120 110 M 120 110 L 170 90 M 120 110 L 170 130" stroke="#087F8C" strokeWidth="4" strokeLinecap="round" fill="none"/>
-                    <circle cx="170" cy="90" r="5" fill="#16A34A"/>
-                    <circle cx="170" cy="130" r="5" fill="#16A34A"/>
-                    <circle cx="120" cy="50" r="5" fill="#15365B"/>
-                  </svg>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'molecule' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— CHEMINFORMATICS & DRUG LIKENESS</div>
-                  <h2>RDKit Small-Molecule Descriptor Screening</h2>
-                  <p>Compute Lipinski's Rule of 5 violations, topological polar surface area (TPSA), LogP, and hydrogen bond capacity.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">💊</div><span>Lipinski Rule of 5</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">⚖️</div><span>Molecular Weight</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">💧</div><span>LogP Hydrophobicity</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🔗</div><span>H-Bond Donors/Acc</span></div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="200" height="160" viewBox="0 0 200 160">
-                    <polygon points="100,30 140,55 140,105 100,130 60,105 60,55" fill="none" stroke="#087F8C" strokeWidth="4"/>
-                    <circle cx="100" cy="30" r="8" fill="#15365B"/>
-                    <circle cx="140" cy="55" r="8" fill="#16A34A"/>
-                    <circle cx="60" cy="105" r="8" fill="#087F8C"/>
-                  </svg>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'gene' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— GENOMIC INTEGRATION & ANNOTATION</div>
-                  <h2>NCBI Entrez Query & Chromosomal Locus Mapping</h2>
-                  <p>Query Entrez databases live for human/pathogen genomic locus summaries, chromosomal positioning, and transcript IDs.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🔬</div><span>NCBI Gene Search</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">📍</div><span>Locus Tagging</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🧬</div><span>Genomic Sequence</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">📑</div><span>RefSeq Metadata</span></div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="200" height="160" viewBox="0 0 200 160">
-                    <path d="M 50 20 C 150 50, 50 110, 150 140" stroke="#087F8C" strokeWidth="6" fill="none"/>
-                    <path d="M 150 20 C 50 50, 150 110, 50 140" stroke="#15365B" strokeWidth="6" fill="none"/>
-                    <line x1="75" y1="42" x2="125" y2="42" stroke="#16A34A" strokeWidth="3"/>
-                    <line x1="75" y1="118" x2="125" y2="118" stroke="#16A34A" strokeWidth="3"/>
-                  </svg>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'docking' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— COMPUTER-AIDED DRUG DESIGN</div>
-                  <h2>Dynamic In Silico Protein-Ligand Docking</h2>
-                  <p>Estimate binding affinities (kcal/mol), hydrophobic pocket contact scores, and hydrogen bonding interaction profiles.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">⚡</div><span>Binding Affinity</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🎯</div><span>Pocket Identification</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🧪</div><span>Ligand Pose Score</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">📈</div><span>Interaction Profiling</span></div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="200" height="160" viewBox="0 0 200 160">
-                    <circle cx="100" cy="80" r="50" fill="#E4F5F4" stroke="#087F8C" strokeWidth="3" />
-                    <rect x="85" y="65" width="30" height="30" rx="6" fill="#15365B" />
-                    <line x1="100" y1="30" x2="100" y2="65" stroke="#16A34A" strokeWidth="3" strokeDasharray="3,3" />
-                  </svg>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'agent' && (
-              <div className="hero-banner-card">
-                <div className="hero-banner-content">
-                  <div className="hero-tag">— CONVERSATIONAL MULTI-OMICS ROUTER</div>
-                  <h2>Natural Language Multi-Domain AI Router</h2>
-                  <p>Ask natural language questions across proteomics, drug design, genomics, and structure prediction seamlessly.</p>
-                  
-                  <div className="hero-indicators-grid">
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🤖</div><span>NLP Query Intent</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">🔀</div><span>Dynamic Routing</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">💬</div><span>Interactive Chat</span></div>
-                    <div className="feature-indicator-item"><div className="feature-indicator-icon">📄</div><span>Unified Reports</span></div>
-                  </div>
-                </div>
-                <div className="hero-banner-graphic">
-                  <svg width="200" height="160" viewBox="0 0 200 160">
-                    <rect x="40" y="40" width="120" height="80" rx="12" fill="#087F8C" opacity="0.85" />
-                    <circle cx="75" cy="70" r="8" fill="#FFFFFF" />
-                    <circle cx="125" cy="70" r="8" fill="#FFFFFF" />
-                    <path d="M 80 95 Q 100 110, 120 95" stroke="#FFFFFF" strokeWidth="4" strokeLinecap="round" fill="none" />
-                  </svg>
-                </div>
-              </div>
-            )}
-
+            <div className="user-chip" title={user.email}>
+              <span className="user-avatar">{getInitials(profileName)}</span>
+              <span className="user-name">{profileName}</span>
+            </div>
+            <button type="button" className="header-logout" onClick={onLogout}>Sign out</button>
           </div>
-        </main>
-      </div>
+        </header>
+        <div className="content-frame">{typeof children === 'function' ? children(history) : children}</div>
+      </main>
     </div>
   );
 }
 
-export default App;
+function DashboardPage({ searchQuery }) {
+  const visibleModules = modulesList.filter((module) => `${module.title} ${module.desc}`.toLowerCase().includes(searchQuery.trim().toLowerCase()));
+  return (
+    <div className="dashboard-page">
+      <section className="welcome-banner">
+        <div>
+          <span className="welcome-eyebrow">YOUR RESEARCH WORKSPACE</span>
+          <h1>Welcome back 👋</h1>
+          <p>Your AI-powered research assistant for multi-omics analysis, drug discovery and more.</p>
+          <div className="banner-pills"><span>🧬 Genomics</span><span>🔬 Proteomics</span><span>💊 Drug Design</span><span>📊 Research Insights</span></div>
+        </div>
+      </section>
+      <section className="module-section" id="modules">
+        <div className="section-heading">
+          <div><span className="section-eyebrow">WORKSPACE</span><h2>Available Research Modules</h2><p>Choose a module to start your analysis.</p></div>
+          <span className="module-count">{visibleModules.length} modules</span>
+        </div>
+        {visibleModules.length > 0 ? (
+          <div className="module-grid">
+            {visibleModules.map((module) => (
+              <Link key={module.id} to={`/module/${module.id}`} className="module-card">
+                <div className="module-card-left">
+                  <div className="module-icon-box" style={{ background: module.accent, color: module.accentStrong }}><ModuleIcon moduleId={module.id} /></div>
+                  <div className="module-meta"><h3>{module.title}</h3><p>{module.desc}</p></div>
+                </div>
+                <span className="arrow-indicator" aria-hidden="true">→</span>
+              </Link>
+            ))}
+          </div>
+        ) : <div className="empty-state"><strong>No modules found</strong><p>Try a different search term.</p></div>}
+      </section>
+    </div>
+  );
+}
+
+function BackToDashboard() {
+  return <Link to="/dashboard" className="back-link">← Back to Dashboard</Link>;
+}
+
+function ModuleDetailPage({ user }) {
+  const { moduleId } = useParams();
+  const module = getModuleById(moduleId);
+  const [activeTab, setActiveTab] = useState('analysis');
+  const [input, setInput] = useState('');
+  const [proteinSequence, setProteinSequence] = useState('');
+  const [ligandSmiles, setLigandSmiles] = useState('');
+  const [fileName, setFileName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [response, setResponse] = useState(null);
+  const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
+
+  if (!module) return <Navigate to="/dashboard" replace />;
+
+  const setExample = (example) => {
+    if (module.id === 'docking') {
+      setProteinSequence(example.proteinSequence);
+      setLigandSmiles(example.ligandSmiles);
+      setError('');
+      return;
+    }
+    setInput(typeof example === 'string' ? example : example.value);
+    setError('');
+  };
+
+  const handleFile = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError('');
+    if (file.size > 5 * 1024 * 1024) {
+      setError('File is larger than 5 MB. Choose a smaller input file.');
+      event.target.value = '';
+      return;
+    }
+    try {
+      const contents = await file.text();
+      if (module.id === 'docking') setProteinSequence(contents);
+      else setInput(contents);
+      setFileName(file.name);
+    } catch (fileError) {
+      console.error('Could not read the selected analysis file.', fileError);
+      setError('The selected file could not be read. Try a plain-text FASTA or SMILES file.');
+    }
+  };
+
+  const handleAnalyze = async (event) => {
+    event.preventDefault();
+    setError('');
+    setResponse(null);
+    const query = input.trim();
+    if (module.id === 'docking') {
+      if (!proteinSequence.trim() || !ligandSmiles.trim()) {
+        setError('Enter both a protein sequence and a ligand SMILES string.');
+        return;
+      }
+    } else if (!query) {
+      setError('Please enter a valid input before running analysis.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      let result;
+      if (module.id === 'protein') {
+        result = await api.post('/api/analyze-protein', { input_data: query });
+      } else if (module.id === 'structure') {
+        result = await api.get(`/api/protein-structure/${encodeURIComponent(query)}`);
+      } else if (module.id === 'phylogeny') {
+        result = await api.post('/api/phylogenetic-analysis-dynamic', { fasta_sequences: query });
+      } else if (module.id === 'molecule') {
+        result = await api.post('/api/analyze-molecule', { smiles: query });
+      } else if (module.id === 'gene') {
+        result = await api.post('/api/analyze-gene', { gene_symbol: query });
+      } else if (module.id === 'docking') {
+        result = await api.post('/api/dynamic-docking-simulation', {
+          protein_sequence: proteinSequence.trim(),
+          smiles: ligandSmiles.trim(),
+        });
+      } else {
+        result = await api.post('/api/agent-chat', { message: query });
+      }
+
+      setResponse(module.id === 'agent' ? (result.data.response || result.data) : result.data);
+      saveHistory(user.email, module.id);
+    } catch (requestError) {
+      const detail = requestError.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : requestError.message || 'Analysis execution failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const examples = moduleExamples[module.id] || [];
+  const inputConfig = moduleInputs[module.id];
+
+  return (
+    <div className="module-detail-page">
+      <BackToDashboard />
+      <div className="module-header-card">
+        <div className="module-header-main">
+          <div className="module-icon-box large" style={{ background: module.accent, color: module.accentStrong }}><ModuleIcon moduleId={module.id} /></div>
+          <div><h2>{module.title}</h2><p>{module.desc}. Connect to authoritative scientific tools from one workspace.</p></div>
+        </div>
+        <span className="status-badge">● Ready</span>
+      </div>
+
+      <div className="module-tabs" role="tablist" aria-label={`${module.title} sections`}>
+        <button type="button" role="tab" aria-selected={activeTab === 'analysis'} className={activeTab === 'analysis' ? 'tab active' : 'tab'} onClick={() => setActiveTab('analysis')}>Analysis</button>
+        <button type="button" role="tab" aria-selected={activeTab === 'history'} className={activeTab === 'history' ? 'tab active' : 'tab'} onClick={() => setActiveTab('history')}>History</button>
+        <button type="button" role="tab" aria-selected={activeTab === 'documentation'} className={activeTab === 'documentation' ? 'tab active' : 'tab'} onClick={() => setActiveTab('documentation')}>Documentation</button>
+      </div>
+
+      {activeTab === 'analysis' && (
+        <>
+          <form onSubmit={handleAnalyze} className="analysis-panel">
+            {module.id === 'docking' ? (
+              <div className="docking-input-grid">
+                <label className="field-group"><span>Protein sequence</span><textarea value={proteinSequence} onChange={(event) => setProteinSequence(event.target.value)} className="sequence-textarea" placeholder="Paste the protein amino-acid sequence..." disabled={loading} /></label>
+                <label className="field-group"><span>Ligand SMILES</span><textarea value={ligandSmiles} onChange={(event) => setLigandSmiles(event.target.value)} className="sequence-textarea compact-textarea" placeholder="Enter ligand SMILES (e.g. CCO)..." disabled={loading} /></label>
+              </div>
+            ) : (
+              <>
+                <div className="analysis-toolbar"><span>{inputConfig.label}</span><span className="format-hint">{module.id === 'phylogeny' ? 'FASTA' : module.id === 'molecule' ? 'SMILES' : 'Scientific input'}</span></div>
+                <textarea value={input} onChange={(event) => setInput(event.target.value)} className="sequence-textarea" placeholder={inputConfig.placeholder} disabled={loading} />
+              </>
+            )}
+            <div className="upload-row">
+              <span>{module.id === 'docking' ? 'Or upload a protein sequence' : 'Or upload an input file'}</span>
+              <input ref={fileInputRef} className="visually-hidden" type="file" accept=".fasta,.fa,.fna,.txt,.smi,.smiles,.csv" onChange={handleFile} />
+              <button type="button" className="choose-file-btn" onClick={() => fileInputRef.current?.click()} disabled={loading}>Choose File</button>
+              <span className="file-status">{fileName || 'No file chosen'}</span>
+            </div>
+            {error && <div className="form-alert error" role="alert">{error}</div>}
+            <button type="submit" className="primary-action" disabled={loading}><span aria-hidden="true">▶</span>{loading ? 'Running analysis…' : 'Run Analysis'}</button>
+          </form>
+          <div className="quick-examples-box">
+            <span className="input-label">💡 Quick Examples</span>
+            <div className="examples-row">{examples.map((example) => {
+              const label = typeof example === 'string' ? example : example.label;
+              return <button key={label} type="button" className="example-chip" onClick={() => setExample(example)}>{label}</button>;
+            })}</div>
+          </div>
+          {response && <div className="analysis-panel result-panel"><div className="result-heading"><div><span className="section-eyebrow">COMPLETED</span><h3>Execution Results</h3></div><span className="status-badge">Success</span></div><pre>{JSON.stringify(response, null, 2)}</pre></div>}
+          <div className="feature-metrics">{(moduleHighlights[module.id] || []).map(([icon, title, description]) => <div className="metric-box" key={title}><div className="metric-icon">{icon}</div><h4>{title}</h4><p>{description}</p></div>)}</div>
+        </>
+      )}
+      {activeTab === 'history' && <div className="analysis-panel"><h3>Recent analysis runs</h3><AnalysisHistory records={readHistory(user.email).filter((record) => record.moduleId === module.id)} /></div>}
+      {activeTab === 'documentation' && (
+        <div className="analysis-panel documentation-panel">
+          <span className="section-eyebrow">MODULE GUIDE</span>
+          <h3>{module.title}</h3>
+          <p>{module.desc}. Enter the required input and run the analysis to request results from the connected Aletheia Bio research backend.</p>
+          <ul><li>Use an accession or sequence format appropriate to this module.</li><li>Use the Quick Examples to prefill a supported sample.</li><li>Results and errors are returned by the connected backend.</li></ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AnalysisHistory({ records, onClear }) {
+  if (records.length === 0) return <div className="empty-state"><strong>No completed analyses yet</strong><p>Successful module runs will appear here. Input sequences and results are not stored in browser history.</p></div>;
+  return (
+    <div className="history-list">
+      {records.map((record) => (
+        <div className="history-row" key={record.id}>
+          <div className="history-icon"><ModuleIcon moduleId={record.moduleId} /></div>
+          <div className="history-copy"><strong>{getModuleById(record.moduleId)?.title || 'Research module'}</strong><span>{new Date(record.createdAt).toLocaleString()}</span></div>
+          <span className="status-badge">{record.status}</span>
+        </div>
+      ))}
+      {onClear && <button type="button" className="secondary-button" onClick={onClear}>Clear history</button>}
+    </div>
+  );
+}
+
+function HistoryPage({ user, history }) {
+  const navigate = useNavigate();
+  const clearHistory = () => {
+    if (!window.confirm('Clear saved analysis history for this account on this browser?')) return;
+    localStorage.removeItem(getHistoryKey(user.email));
+    navigate('/history', { replace: true, state: { historyCleared: true } });
+  };
+
+  return (
+    <section className="utility-page">
+      <BackToDashboard />
+      <div className="utility-heading"><span className="section-eyebrow">WORKSPACE</span><h1>Analysis History</h1><p>Review successful research runs from this browser.</p></div>
+      <div className="analysis-panel"><AnalysisHistory records={history} onClear={history.length > 0 ? clearHistory : null} /></div>
+      <p className="privacy-note">For privacy, analysis inputs and result data are not stored in browser history.</p>
+    </section>
+  );
+}
+
+function getPreferences(email) {
+  try {
+    return JSON.parse(localStorage.getItem(`aletheia-preferences:${email}`) || '{"notifications":true}');
+  } catch (error) {
+    console.error('Could not read saved workspace preferences.', error);
+    return { notifications: true };
+  }
+}
+
+function SettingsPage({ user, onUserUpdated }) {
+  const [displayName, setDisplayName] = useState(user.display_name);
+  const [notifications, setNotifications] = useState(() => getPreferences(user.email).notifications !== false);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState('');
+  const [error, setError] = useState('');
+
+  const saveSettings = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setStatus('');
+    setError('');
+    try {
+      const response = await api.patch('/api/auth/profile', { display_name: displayName.trim() });
+      const preferences = { ...getPreferences(user.email), notifications };
+      localStorage.setItem(`aletheia-preferences:${user.email}`, JSON.stringify(preferences));
+      onUserUpdated(response.data);
+      setStatus('Your profile and preferences have been saved.');
+    } catch (requestError) {
+      setError(requestError.response?.data?.detail || 'Unable to save settings. Check your connection and try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="utility-page">
+      <BackToDashboard />
+      <div className="utility-heading"><span className="section-eyebrow">PREFERENCES</span><h1>Settings</h1><p>Manage your profile and workspace preferences.</p></div>
+      {error && <div className="form-alert error" role="alert">{error}</div>}
+      {status && <div className="form-alert success" role="status">{status}</div>}
+      <form className="settings-grid" onSubmit={saveSettings}>
+        <section className="analysis-panel settings-card">
+          <h2>Profile</h2>
+          <p className="settings-description">Your account identity and workspace display name.</p>
+          <label className="field-group"><span>Display name</span><div className="input-shell"><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required minLength={2} maxLength={80} /></div></label>
+          <label className="field-group"><span>Email address</span><div className="input-shell"><input type="email" value={user.email} readOnly /></div></label>
+          <p className="privacy-note">Email address is your unique account identifier and cannot be changed here.</p>
+        </section>
+        <section className="analysis-panel settings-card">
+          <h2>Workspace preferences</h2>
+          <p className="settings-description">Choose which in-app updates to show.</p>
+          <label className="preference-row"><span><strong>Analysis notifications</strong><small>Show in-app updates when you finish an analysis.</small></span><input type="checkbox" checked={notifications} onChange={(event) => setNotifications(event.target.checked)} /></label>
+        </section>
+        <button type="submit" className="primary-action settings-submit" disabled={saving}>{saving ? 'Saving…' : 'Save Settings'}</button>
+      </form>
+    </section>
+  );
+}
+
+function AppRoutes() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(() => Boolean(getToken()));
+  const [authNotice, setAuthNotice] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    if (!getToken()) {
+      return undefined;
+    }
+    api.get('/api/auth/me')
+      .then((response) => {
+        if (active) setUser(response.data);
+      })
+      .catch((error) => {
+        if (!active) return;
+        if (error.response?.status === 401) {
+          clearToken();
+        } else {
+          console.error('Unable to verify the saved sign-in session.', error);
+          setAuthNotice('Could not verify your saved session. Sign in again when the backend is available.');
+        }
+      })
+      .finally(() => {
+        if (active) setAuthLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const expireSession = () => {
+      clearToken();
+      setUser(null);
+      setAuthNotice('Your session expired. Please sign in again.');
+      navigate('/', { replace: true });
+    };
+    window.addEventListener('aletheia:session-expired', expireSession);
+    return () => window.removeEventListener('aletheia:session-expired', expireSession);
+  }, [navigate]);
+
+  const handleAuthenticated = (authenticatedUser) => {
+    setUser(authenticatedUser);
+    setAuthNotice('');
+    setSearchQuery('');
+    navigate('/dashboard', { replace: true });
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.post('/api/auth/logout');
+    } catch (error) {
+      console.error('The server could not revoke the session; clearing the local sign-in state.', error);
+    } finally {
+      clearToken();
+      setUser(null);
+      setAuthNotice('');
+      setSearchQuery('');
+      navigate('/', { replace: true });
+    }
+  };
+
+  if (authLoading) return <div className="app-loading" role="status">Verifying your session…</div>;
+
+  return (
+    <Routes>
+      <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage onAuthenticated={handleAuthenticated} notice={authNotice} />} />
+      <Route path="/register" element={user ? <Navigate to="/dashboard" replace /> : <RegisterPage onAuthenticated={handleAuthenticated} />} />
+      <Route path="/dashboard" element={user ? <DashboardLayout user={user} onLogout={handleLogout} searchQuery={searchQuery} setSearchQuery={setSearchQuery}><DashboardPage searchQuery={searchQuery} /></DashboardLayout> : <Navigate to="/" replace />} />
+      <Route path="/module/:moduleId" element={user ? <DashboardLayout user={user} onLogout={handleLogout} searchQuery={searchQuery} setSearchQuery={setSearchQuery}><ModuleDetailPage key={location.pathname} user={user} /></DashboardLayout> : <Navigate to="/" replace />} />
+      <Route path="/history" element={user ? <DashboardLayout user={user} onLogout={handleLogout} searchQuery={searchQuery} setSearchQuery={setSearchQuery}>{(history) => <HistoryPage user={user} history={history} />}</DashboardLayout> : <Navigate to="/" replace />} />
+      <Route path="/settings" element={user ? <DashboardLayout user={user} onLogout={handleLogout} searchQuery={searchQuery} setSearchQuery={setSearchQuery}><SettingsPage user={user} onUserUpdated={setUser} /></DashboardLayout> : <Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to={user ? '/dashboard' : '/'} replace />} />
+    </Routes>
+  );
+}
+
+export default function App() {
+  return <BrowserRouter><AppRoutes /></BrowserRouter>;
+}
